@@ -326,6 +326,9 @@ static char *ngx_http_upstream_dynamic_servers_merge_conf(ngx_conf_t *cf, void *
 
 static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cycle) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
+    if (udsmcf == NULL) {
+        return NGX_OK;
+    } 
     ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
     ngx_uint_t i;
     ngx_event_t *timer;
@@ -347,10 +350,18 @@ static ngx_int_t ngx_http_upstream_dynamic_servers_init_process(ngx_cycle_t *cyc
 
 static void ngx_http_upstream_dynamic_servers_exit_process(ngx_cycle_t *cycle) {
     ngx_http_upstream_dynamic_server_main_conf_t  *udsmcf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_upstream_dynamic_servers_module);
+    if (udsmcf == NULL) {
+        return;
+    }    
     ngx_http_upstream_dynamic_server_conf_t       *dynamic_server = udsmcf->dynamic_servers.elts;
     ngx_uint_t i;
 
     for (i = 0; i < udsmcf->dynamic_servers.nelts; i++) {
+        if (dynamic_server[i].previous_pool != NULL && 
+            dynamic_server[i].pool != dynamic_server[i].previous_pool) {
+            ngx_destroy_pool(dynamic_server[i].previous_pool);
+            dynamic_server[i].previous_pool = NULL;
+        }
         if (dynamic_server[i].pool) {
             ngx_destroy_pool(dynamic_server[i].pool);
             dynamic_server[i].pool = NULL;
@@ -414,19 +425,25 @@ static void ngx_http_upstream_dynamic_server_resolve_handler(ngx_resolver_ctx_t 
         u.url = ngx_http_upstream_dynamic_server_null_route;
         u.default_port = 80;
         u.no_resolve = 1;
-        if (ngx_parse_url(ngx_cycle->pool, &u) != NGX_OK) {
-            if (u.err) {
-                ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0,
-                              "%s in upstream \"%V\"", u.err, &u.url);
-            }
+        parse_pool = ngx_create_pool(1024, ctx->resolver->log);
+        if (parse_pool == NULL) {
+            ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0,
+                "upstream-dynamic-servers: Could not create parse_pool");
+        } else {
+            if (ngx_parse_url(parse_pool, &u) != NGX_OK) {
+                if (u.err) {
+                    ngx_log_error(NGX_LOG_ERR, ctx->resolver->log, 0,
+                        "%s in upstream \"%V\"", u.err, &u.url);
+                }
 
-            goto end;
-        }
-        ctx->addr.sockaddr = u.addrs[0].sockaddr;
-        ctx->addr.socklen = u.addrs[0].socklen;
-        ctx->addr.name = u.addrs[0].name;
-        ctx->addrs = &ctx->addr;
-        ctx->naddrs = u.naddrs;
+                goto end;
+            }
+            ctx->addr.sockaddr = u.addrs[0].sockaddr;
+            ctx->addr.socklen = u.addrs[0].socklen;
+            ctx->addr.name = u.addrs[0].name;
+            ctx->addrs = &ctx->addr;
+            ctx->naddrs = u.naddrs;
+        }       
     }
 
     if (ctx->naddrs != dynamic_server->server->naddrs) {
@@ -552,7 +569,9 @@ end:
     }
 
     ngx_resolve_name_done(ctx);
-
+    if (parse_pool != NULL) {
+        ngx_destroy_pool(parse_pool);
+    }
     if (ngx_exiting) {
         ngx_log_debug(NGX_LOG_DEBUG_CORE, ngx_cycle->log, 0, "upstream-dynamic-servers: worker is about to exit, do not set the timer again");
         return;
